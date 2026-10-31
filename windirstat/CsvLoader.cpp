@@ -13,6 +13,12 @@ static bool IsJsonPath(const std::wstring& path)
     return path.size() >= 5 && _wcsicmp(path.c_str() + path.size() - 5, L".json") == 0;
 }
 
+// RANFT ADDED FUNCTION
+static bool IsRanftPath(const std::wstring& path)
+{
+    return path.size() >= 5 && _wcsicmp(path.c_str() + path.size() - 6, L".ranft") == 0;
+}
+
 // Wide string → UTF-8; Localization has no reverse equivalent so we keep this here
 static std::string WideToUtf8(const std::wstring_view wv)
 {
@@ -158,6 +164,16 @@ static std::string ToTimePoint(const FILETIME& fileTime)
         sysTime.wHour, sysTime.wMinute, sysTime.wSecond);
 }
 
+// RANFT ADDED FUNCTION
+static std::string ToTimePointRanft(const FILETIME& fileTime)
+{
+    SYSTEMTIME sysTime;
+    if (!FileTimeToSystemTime(&fileTime, &sysTime)) return {};
+    return std::format("{}-{:02}-{:02} {:02}:{:02}:{:02}",
+        sysTime.wYear, sysTime.wMonth, sysTime.wDay,
+        sysTime.wHour, sysTime.wMinute, sysTime.wSecond);
+}
+
 static FILETIME FromTimeString(const std::wstring_view time)
 {
     // Expected format: YYYY-MM-DDTHH:MM:SSZ
@@ -176,6 +192,13 @@ static FILETIME FromTimeString(const std::wstring_view time)
 static std::string QuoteAndConvert(const std::wstring_view inc)
 {
     return std::format("\"{}\"", WideToUtf8(inc));
+}
+
+// RANFT ADDED FUNCTION
+// Convert wide to UTF-8
+static std::string Convert(const std::wstring_view inc)
+{
+    return std::format("{}", WideToUtf8(inc));
 }
 
 // ── shared item-construction helper ─────────────────────────────────────────
@@ -465,13 +488,63 @@ static std::unordered_map<const CItem*, LONGLONG>
     return adjustedSizes;
 }
 
+// RANFT ADDED FUNCTION
+static bool SaveResultsRanft(std::ofstream& outf, const std::vector<const CItem*>& items,
+    const std::vector<std::wstring>& cols, const std::unordered_map<const CItem*, LONGLONG>& adjustedSizes,
+    const bool includeOwner)
+{
+    // Header
+    // RANFT - DO NOT OUTPUT THE HEADER
+    //for (const auto [i, col] : std::views::enumerate(cols))
+    //    outf << QuoteAndConvert(col) << (static_cast<size_t>(i) + 1 < cols.size() ? "," : "");
+
+    // Rows
+    for (const auto* item : items)
+    {
+        const bool nonPathItem = item->IsTypeOrFlag(IT_MYCOMPUTER);
+        const ITEMTYPE itemType = item->GetRawType() & ~ITF_HARDLINK & ~ITHASH_MASK & ~ITF_EXTDATA;
+        const auto adjIt = adjustedSizes.find(item);
+        const auto adjustedSize = adjIt != adjustedSizes.end() ? adjIt->second : 0;
+        // MTP indices are process-local path registrations and must not be serialized
+        const ULONGLONG index = item->IsTypeOrFlag(ITF_MTP) ? 0 : item->GetIndex();
+
+        // RANFT - OUTPUT THE pathname, filesize, and time data on seperate rows instead
+        //std::format_to(std::ostreambuf_iterator(outf), "\r\n{},{},{},{},{},{},{},0x{:08X},0x{:016X}",
+        //    QuoteAndConvert(nonPathItem ? item->GetName() : item->GetPath()),
+        //    item->GetFilesCount(),
+        //    item->GetFoldersCount(),
+        //    item->GetSizeLogical(),
+        //    item->GetSizePhysicalRaw() + adjustedSize,
+        //    QuoteAndConvert(FormatAttributes(item->GetAttributes())),
+        //    ToTimePoint(item->GetLastChange()),
+        //    std::to_underlying(itemType),
+        //    index);
+        //if (includeOwner) outf << "," << QuoteAndConvert(item->GetOwner(true));
+        ULARGE_INTEGER uli;
+        FILETIME fileTime;
+        fileTime = item->GetLastChange();
+        uli.LowPart = fileTime.dwLowDateTime;
+        uli.HighPart = fileTime.dwHighDateTime;
+        unsigned __int64 rawTicks = uli.QuadPart + 504911232000000000;  // convert to vb.net timestamp (100 nanoseconds from 1/1/0001)
+
+        if ((itemType & IT_FILE) == IT_FILE)
+        std::format_to(std::ostreambuf_iterator(outf), "{}\r\n{}\r\n{}\r\n{}\r\n",
+            Convert(nonPathItem ? item->GetName() : item->GetPath()),
+            item->GetSizeLogical(),
+            ToTimePointRanft(item->GetLastChange()),
+            rawTicks);
+    }
+    outf.flush();
+    return outf.good();
+}
+
 static bool SaveResultsCsv(std::ofstream& outf, const std::vector<const CItem*>& items,
     const std::vector<std::wstring>& cols, const std::unordered_map<const CItem*, LONGLONG>& adjustedSizes,
     const bool includeOwner)
 {
     // Header
     for (const auto [i, col] : std::views::enumerate(cols))
-        outf << QuoteAndConvert(col) << (static_cast<size_t>(i) + 1 < cols.size() ? "," : "");
+       outf << QuoteAndConvert(col) << (static_cast<size_t>(i) + 1 < cols.size() ? "," : "");
 
     // Rows
     for (const auto* item : items)
@@ -576,9 +649,15 @@ bool SaveResults(const std::wstring& path, CItem* rootItem)
     std::ofstream outf(path, std::ios::binary);
     if (!outf.is_open()) return false;
 
+    // RANFT MODIFIED RETURN
+    //return IsJsonPath(path)
+    //    ? SaveResultsJson(outf, items, cols, adjustedSizes, includeOwner)
+    //    : SaveResultsCsv (outf, items, cols, adjustedSizes, includeOwner);
     return IsJsonPath(path)
         ? SaveResultsJson(outf, items, cols, adjustedSizes, includeOwner)
-        : SaveResultsCsv (outf, items, cols, adjustedSizes, includeOwner);
+        : IsRanftPath(path)
+        ? SaveResultsRanft(outf, items, cols, adjustedSizes, includeOwner)
+        : SaveResultsCsv(outf, items, cols, adjustedSizes, includeOwner);
 }
 
 static std::vector<std::tuple<std::wstring, const CItem*, bool>>
